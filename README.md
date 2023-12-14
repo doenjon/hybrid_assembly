@@ -6,8 +6,6 @@
 [Usage](#usage)
 [Output](#output)
 
-TODO: comment python scripts
-
 ## Introduction
 This nextflow pipeline is designed for fast exploration of many similar genome assembly methods for complex eukayotic genomes using mixed illumina and nanopore data.
 
