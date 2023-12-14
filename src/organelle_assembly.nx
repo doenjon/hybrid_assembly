@@ -1,0 +1,205 @@
+/*
+Nextflow Script
+Author: Jon Doenier
+Date: 2023
+Description: Perform assembly of organelles
+*/
+
+nextflow.enable.dsl=2
+
+include { unicycler; flye_assembly; flye } from "./genome_assembly.nx"
+
+workflow organelle_assembly {
+  /* 
+  A workflow for assembly of mitochondrial, plastid, and SB genomes
+  */
+  take: 
+    ont_reads         // nanopore reads in fastq format
+    illumina_reads    // paired illumina reads fastq
+
+  main:    
+    pubDir = "organelle_assemblies"
+
+    plastid_assembly(ont_reads, illumina_reads, pubDir)
+    mitochondria_assembly(ont_reads, illumina_reads, pubDir)
+    spheroid_body_assembly(ont_reads, illumina_reads, pubDir)
+}
+
+workflow plastid_assembly {
+  /* 
+  A workflow for targeted assembly of plastid genomes
+  */ 
+  take: 
+    ont_reads         // nanopore reads in fastq format
+    illumina_reads    // paired illumina reads fastq
+    pubDir            // publish directory
+
+  main:    
+  	pubDir += "/plastid_assembly"
+    
+    plastid_reference = "MH113811 NC_038001.1 NC_044785.1 MW679506.1 NC_015403.1 EF067921 NC_044465.1 MW722944.1 NC_016731.1 NC_024079.1 EF067920 JQ088178 KC509523 Z67753 KC509519 KC509521 KC509525 AP011960 KC509520 KF733443 KC509522"
+    plastid_genomes = download_reference_genomes(plastid_reference, pubDir)
+
+    ont_plastid_reads = get_ont_mapped_reads(ont_reads, plastid_genomes, pubDir).mapped_ont
+    illumina_plastid_reads = get_illumina_mapped_reads(illumina_reads, plastid_genomes, pubDir).mapped_illumina
+		
+		unicycler(ont_plastid_reads, illumina_plastid_reads, pubDir)
+		get_plastid(unicycler.out.asm_graph, pubDir)
+}
+
+workflow mitochondria_assembly {
+  /* 
+  A workflow for targeted assembly of mitochondrial genomes
+  */ 
+  take: 
+    ont_reads         // nanopore reads in fastq format
+    illumina_reads    // paired illumina reads fastq
+    pubDir            // publish directory
+
+  main:    
+    pubDir += "/mitochondria_assembly"
+    
+    mito_reference = "MH297491 MF997421 NC_026126 MF997419 MF997422 KT874463 MF997423 NC_007405 MF997420 KR149143 GU002153 KY021079 HQ840789 NC_032171.1 NC_032029.1 NC_056903.1 NC_037987.1 NC_037986.1 "
+    mitochondria_genomes = download_reference_genomes(mito_reference, pubDir)
+
+    ont_mito_reads = get_ont_mapped_reads(ont_reads, mitochondria_genomes, pubDir).mapped_ont
+    illumina_mito_reads = get_illumina_mapped_reads(illumina_reads, mitochondria_genomes, pubDir).mapped_illumina
+    
+    unicycler(ont_mito_reads, illumina_mito_reads, pubDir)
+    get_mito(unicycler.out.asm_graph, pubDir)
+}
+
+workflow spheroid_body_assembly {
+  /* 
+  A workflow for targeted assembly of spheroid body genomes
+  */ 
+  take: 
+    ont_reads         // nanopore reads in fastq format
+    illumina_reads    // paired illumina reads fastq
+    pubDir            // publish directory
+
+  main:    
+    pubDir += "/spheroid_body_assembly"
+    
+    sb_reference = "NZ_AP012549.1 NZ_AP018341.1"
+    spheroid_body_genomes = download_reference_genomes(sb_reference, pubDir)
+
+    ont_sb_reads = get_ont_mapped_reads(ont_reads, spheroid_body_genomes, pubDir).mapped_ont
+    illumina_sb_reads = get_illumina_mapped_reads(illumina_reads, spheroid_body_genomes, pubDir).mapped_illumina
+    
+    flye(ont_sb_reads, pubDir)
+    get_sb(flye.out.asm, pubDir)
+}
+
+process download_reference_genomes {
+  /* 
+  A process for downloading reference genomes from NCBI
+  */ 
+  publishDir { params.results + pubDir + "/" + "reference_genomes" } , mode: "copy"
+  errorStrategy = "ignore"
+	label "slurm_trivial"
+
+  input:
+    val(acc)    // accession number 
+    val(pubDir) // publish directory
+
+	output:
+	  path("reference_genomes.fasta"), emit: plastid_genomes
+
+	script:
+		"""
+		ncbi-acc-download --format fasta --out reference_genomes.fasta ${acc}
+    """
+}
+
+process get_ont_mapped_reads {
+  /* 
+  A process to get nanopore reads that map to a target genome
+  */ 
+  publishDir { params.results + pubDir + "/" + "reads" } , mode: "copy"
+  errorStrategy = "ignore"
+  label "slurm_mapping"
+
+  input:
+    path(reads)           // nanopore reads, fastq format
+    path(target_genomes)  // reference genome to map to
+    val(pubDir)           // publish directory
+
+  output:
+    path("mapped.fastq"), emit: mapped_ont
+
+  script:
+    """
+      minimap2 -ax map-ont ${target_genomes} ${reads} -t ${task.cpus} | samtools view -b -F 4 | samtools fastq > mapped.fastq 
+    """
+}
+
+process get_illumina_mapped_reads {
+  publishDir { params.results + pubDir + "/" + "reads" } , mode: "copy"
+  errorStrategy = "ignore"
+  label "slurm_mapping"
+
+  input:
+  	tuple path(r1), path(r2)    // illumina read fastq
+    path(target_genomes)        // reference genome to map to
+    val(pubDir)                 // publish directory
+
+  output:
+    tuple path(mapped_r1), path(mapped_r2), emit: mapped_illumina
+
+  script:
+  	mapped_r1 = "mapped_R1.fastq"
+  	mapped_r2 = "mapped_R2.fastq"
+
+    """
+    minimap2 -ax sr ${target_genomes} ${r1} ${r2} | samtools view -b -F 4 -o sr_mapped.bam
+    samtools sort -m 1G -@ ${task.cpus} -n sr_mapped.bam | samtools fastq -1 ${mapped_r1} -2 ${mapped_r2} -s singlets.fastq
+    """
+}
+
+process get_plastid {
+	publishDir { params.results + pubDir + "/" + "get_plastid" } , mode: "copy"
+  label "slurm_shasta"
+
+  input:
+  	path(graph)   // assembly graph 
+    val(pubDir)   // pubilsh directory
+
+  script:
+    """
+		get_organelle_from_assembly.py -g ${graph} -o from_graph -F embplant_pt -t ${task.cpus}
+    """
+}
+
+process get_mito {
+  publishDir { params.results + pubDir + "/" + "get_mito" } , mode: "copy"
+  label "slurm_shasta"
+
+  input:
+  	path(graph)   // assembly graph 
+    val(pubDir)   // pubilsh directory
+
+  script:
+    """
+    get_organelle_from_assembly.py -g ${graph} -o from_graph -F embplant_mt -t ${task.cpus}
+    """
+}
+
+process get_sb {
+  publishDir { params.results + pubDir + "/" + "get_sb" } , mode: "copy"
+  label "slurm_trivial"
+
+  input:
+    path(fasta)   // assembly in fasta format
+    val(pubDir)   // publish directory
+
+  output:
+    path("spheroid_body.fa"), emit: asm
+
+  script:
+    """
+    # Naively grab the sequence that's the right size. 
+    # Seems nothing else large gets assembled
+    seqkt -L 2800000 ${fasta} > spheroid_body.fa
+    """
+}

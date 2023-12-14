@@ -1,0 +1,319 @@
+/*
+Nextflow Script
+Author: Jon Doenier
+Date: 2023
+Description: Perform preprocessing on reads
+*/
+
+nextflow.enable.dsl=2
+
+include { diamond } from "./assembly_analysis.nx"
+
+
+workflow preprocess_nanopore {
+  /* 
+  A workflow to process nanopore reads
+  */
+  main:
+
+    pubDir = "reads/nanopore"
+
+    // Handle nanopore
+    if (params.fast5_dir) {
+      guppy(Channel.fromList(params.fast5_dir), pubDir)
+      combined_reads = guppy_collect(guppy.out.reads.toList(), pubDir + "/guppy").reads
+    } else {
+      combined_reads = guppy_collect(Channel.fromList(params.ont_reads).toList(), pubDir).reads
+    }
+
+    // Prefiltered read analysis
+    nanoplot(combined_reads, pubDir)
+    nanopore_genome_size_estimation(combined_reads, pubDir)
+    
+    // Filter reads
+    ont_reads = nanofilt(combined_reads, 10, pubDir).fastq_filt
+
+    // Postfilter read analysis
+    fastqc(ont_reads, pubDir)  //<- sometimes broken, JVM suck, not enough memory allocated for long reads. If dies on memory, github says to give more threads
+	
+    // Do phylogenetic analysis on a subsample of reads
+    num_reads = 50000
+    seed = 0
+    diamond(ont_reads.splitFastq(by:num_reads, file:true).first(), pubDir)
+
+  emit: 
+    ont_reads
+}
+
+workflow preprocess_illumina {
+  /* 
+  A workflow to process illumina whole genome sequencing reads
+  */
+  main:
+
+    pubDir = "reads/illumina"
+
+    // Handle illumina reads
+    if(params.illumina) {
+      
+      illumina_reads = fastp(Channel.fromList(params.illumina), pubDir).reads
+      fastqc(illumina_reads, pubDir)
+
+    } else {
+      // In case you have no illumina reads
+      illumina_reads = Channel.empty()
+    }
+
+  emit: 
+    illumina_reads = illumina_reads
+}
+
+workflow preprocess_rna_seq {
+  /* 
+  A workflow to process illumina RNAseq reads
+  */
+	main:
+
+		pubDir = "reads/rna_seq"
+
+		if(params.rna_seq) {
+
+			rna_seq = fastp(Channel.fromList(params.rna_seq), pubDir).reads
+
+	    rna_seq.multiMap { it ->
+	            forward: it[0]
+	            reverse: it[1]
+	            }
+	        .set { rna_seq_split }
+
+	    combined_rna_seq = collect_rnaseq(rna_seq_split.forward.toList(), rna_seq_split.reverse.toList(), pubDir + "/rna_seq_reads_/")
+	  } else {
+	  	rna_seq = Channel.empty()
+	  }
+}
+
+workflow nanopore_genome_size_estimation {
+  /* 
+  A workflow for performing genome size estimation from kmer
+  */
+  take:
+    ont_reads
+    pubDir
+
+  main:
+    pubDir = pubDir + "/genome_size_estimation"
+
+    ont_reads = nanofilt(ont_reads, 20, pubDir).fastq_filt
+    kmer_genome_size(ont_reads, pubDir)
+}
+
+process guppy {
+  /* 
+  basecall nanopore reads with Guppy
+  */
+  publishDir { params.results + pubDir + "/" + "guppy" } , mode: "copy"
+  cache "lenient"
+  label "slurm_guppy"
+  
+  
+  input:
+    path(fast5_dir)     // input reads to basecall
+    val(pubDir)         // publish directory
+
+  output:
+    path("${append}_combined.fastq.gz"), emit: reads
+
+  script:
+    append = fast5_dir.SimpleName
+    """
+    # Set appropriate env variables
+    IFS=', ' read -r -a array <<< \$CUDA_VISIBLE_DEVICES
+    cuda_var=""
+    for element in "\${array[@]}" 
+      do 
+      cuda_var="\${cuda_var} cuda:\${element}"
+      done
+    echo \$cuda_var
+
+    # TODO: Path to guppy
+    /home/groups/ellenyeh/jdoenier/bin/ont-guppy/bin/guppy_basecaller --min_qscore 10 --recursive -c ${params.guppy_config} --compress_fastq --trim_barcodes -i ./${fast5_dir} -s ./ --device "\$cuda_var"
+    cat pass/*.fastq.gz >> ${append}_combined.fastq.gz
+    """
+} 
+
+process guppy_collect {
+  /* 
+  Collect reads from parallel execution of guppy
+  */
+  publishDir { params.results + pubDir } , mode: "copy"
+  label "slurm_short"
+  
+
+  input:
+    path(fastq)   // reads to collect
+    val(pubDir)   // publish directory
+
+  output:
+    path(all_reads), emit: reads
+
+  script:
+    all_reads = params.prefix + "_combined_reads.fastq.gz"
+    """
+    cat $fastq >> $all_reads
+    """
+}
+
+process nanofilt {
+  /* 
+  Filter nanopore reads with NanoFilt
+  */
+  label "slurm_nanofilt"
+  publishDir { params.results + pubDir + "/" + "nanofilt" } , mode: "copy"
+  
+
+  input:
+    path(fastq)         // nanopore reads to filter
+    val(base_quality)   // Phred cutoff
+    val(pubDir)         // publish directory
+
+  output:
+    path(output_fastq), emit: fastq_filt
+
+  script:
+    output_fastq = fastq.SimpleName + "_filtered.fastq.gz"
+    min_read_length = params.min_read_length
+    max_GC = 1
+
+    """
+    if [[ $fastq == *.gz ]]; # Nanofilt can't handle compressed files -- TODO: make dry
+    then
+      gunzip -c ${fastq} | NanoFilt --quality ${base_quality} --length ${min_read_length} --maxGC ${max_GC} --headcrop 50 | gzip > ${output_fastq}
+    else 
+      cat ${fastq} | NanoFilt --quality ${base_quality} --length ${min_read_length} --maxGC ${max_GC} --headcrop 50 | gzip > ${output_fastq}
+    fi
+    """
+}
+
+process fastqc {
+  /* 
+  Analyse reads with fastqc
+  */
+  publishDir { params.results + pubDir + "/" + "fastqc" } , mode: "copy"
+  errorStrategy = "ignore"
+  label "slurm_short"
+  module "biology"
+  module "fastqc/0.11.8"
+  
+
+  input:
+    path(reads)   // illumina reads to analyze
+    val(pubDir)   // publish directory
+
+  output:
+    path("*")
+
+  script:
+    threads = 48
+    """
+    fastqc -t ${threads} -o ./ $reads
+    """
+}
+
+process fastp {
+  /* 
+  Perform quality filtering on illumina reads with fastp
+  */
+  publishDir { params.results + pubDir + "/" + "fastp" } , mode: "copy"
+  label "slurm_fastp"
+  
+
+  input:
+    tuple path(sr_R1), path(sr_R2)    // paired reads to filter
+    val(pubDir)                       // publish directory
+
+  output:
+    tuple path(sr_tR1), path(sr_tR2), emit: reads
+    path("*")
+
+  script:
+    sr_tR1 = sr_R1.SimpleName + "_trimmed.fastq"
+    sr_tR2 = sr_R2.SimpleName + "_trimmed.fastq"
+    sr_tRu1 = sr_R1.SimpleName + "_trimmed_unpaired.fastq"
+    sr_tRu2 = sr_R2.SimpleName + "_trimmed_unpaired.fastq"
+    sr_tRu = sr_R1.SimpleName + "R1R2_trimmed_unpaired.fastq"
+
+    """
+    fastp --dedup --thread ${task.cpus} --length_required 80 --low_complexity_filter --qualified_quality_phred 20 --unqualified_percent_limit 20 --in1 ${sr_R1} --in2 ${sr_R2} --out1 ${sr_tR1} --out2 ${sr_tR2} --unpaired1 ${sr_tRu1} --unpaired2 ${sr_tRu2}
+    cat ${sr_tRu1} > ${sr_tRu}
+    cat ${sr_tRu2} >> ${sr_tRu}
+    """
+}
+
+process collect_rnaseq {
+  /* 
+  Collect RNA seq reads into on file after parallelized filtering
+  */
+  publishDir { params.results + pubDir + "/" + "collect" } , mode: "copy"
+  label "slurm_trivial"
+
+  input:
+    path(r1)    // read 1
+    path(r2)    // read 2
+    val(pubDir) // publish directory
+
+  output:
+    tuple path(all_reads_r1), path(all_reads_r2), emit: reads
+
+  script:
+    all_reads_r1 = params.prefix + "_combined_reads_r1.fastq.gz"
+    all_reads_r2 = params.prefix + "_combined_reads_r2.fastq.gz"
+    """
+    cat $r1 >> $all_reads_r1
+    cat $r2 >> $all_reads_r2
+    """
+}
+
+process nanoplot {
+  /* 
+  Generate quality statistics and plot of nanopore reads
+  */
+	label "slurm_nanofilt"
+  	publishDir { params.results + pubDir + "/" + "nanoplot" } , mode: "copy"
+  
+  input:
+    path(fastq) // input reads
+    val(pubDir) // publish directory
+
+  output:
+    path("*")
+
+  script:
+    """
+    NanoPlot --threads ${task.cpus} --raw --verbose --fastq ${fastq} -o ./
+    """
+}
+
+process kmer_genome_size {
+  /* 
+  Estimate genome size using kmer frequency
+  */
+  label "slurm_nanofilt"
+  publishDir { params.results + pubDir + "/" + "kmer_genome_size" } , mode: "copy"
+
+  input:
+    path(fastq)   // reads to perform estimation on TODO: switch to illumina reads
+    val(pubDir)
+
+  output:
+    path("*")
+
+  script:
+    """
+    kat hist -m 21 -t ${task.cpus} ${fastq}
+    kat_distanalysis --plot kat.hist > genome_size.txt
+    """
+}
+
+
+
+

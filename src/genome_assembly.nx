@@ -1,0 +1,707 @@
+/*
+Nextflow Script
+Author: Jon Doenier
+Date: 2023
+Description: Perform a variety of genome assembly methods
+*/
+
+nextflow.enable.dsl=2
+
+include { assembly_analysis; contamination_analysis } from "./assembly_analysis.nx"
+
+workflow pomoxis_assembly {
+  /* 
+  A workflow for assembly with pomoxis, including preliminary analysis
+  */
+  take: 
+	ont_reads       // nanopore reads in fastq format
+	illumina_reads  // illumina reads in fastq format, paired
+
+  main:    
+  	pubDir = "pomoxis"
+	
+	pomoxis(ont_reads, pubDir)
+	polish_assembly(ont_reads, illumina_reads, pomoxis.out.asm, pubDir)
+	assembly_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+	contamination_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+}
+
+workflow raven_assembly {
+  /* 
+  A workflow for assembly with raven, including preliminary analysis
+  */
+  take: 
+	ont_reads       // nanopore reads in fastq format
+	illumina_reads  // illumina reads in fastq format, paired
+
+  main:
+	pubDir = "raven"
+	
+	raven(ont_reads, pubDir)
+	polish_assembly(ont_reads, illumina_reads, raven.out.asm, pubDir)
+	assembly_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+	contamination_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+
+  emit:
+	diatom_reads = polish_assembly.out.asm
+}
+
+workflow shasta_assembly {
+  /* 
+  A workflow for assembly with shasta, including preliminary analysis
+  */
+  take: 
+	ont_reads       // nanopore reads in fastq format
+	illumina_reads  // illumina reads in fastq format, paired
+
+  main:
+	pubDir = "shasta"
+	
+	shasta(ont_reads, pubDir)
+	polish_assembly(ont_reads, illumina_reads, shasta.out.asm, pubDir)
+	assembly_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+	  contamination_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+  emit:
+	asm = polish_assembly.out.asm
+}
+
+workflow shasta_hap_assembly {
+  /* 
+  A workflow for assembly with shasta in haplotype, including preliminary analysis
+  */
+  take: 
+	ont_reads       // nanopore reads in fastq format
+	illumina_reads  // illumina reads in fastq format, paired
+
+  main:
+	pubDir = "shasta_hap"
+	
+	shasta_hap(ont_reads, pubDir)
+	polish_assembly(ont_reads, illumina_reads, shasta_hap.out.asm, pubDir)
+	assembly_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+	contamination_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+  emit:
+	asm = polish_assembly.out.asm
+}
+
+workflow canu_assembly {
+  /* 
+  A workflow for assembly with canu, including preliminary analysis
+  */
+  take: 
+	ont_reads       // nanopore reads in fastq format
+	illumina_reads  // illumina reads in fastq format, paired
+
+  main:
+	pubDir = "canu"
+	
+	canu(ont_reads, pubDir)
+	polish_assembly(ont_reads, illumina_reads, canu.out.asm, pubDir)
+	  assembly_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+	  contamination_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+}
+
+workflow flye_assembly {
+  /* 
+  A workflow for assembly with flye, including preliminary analysis
+  */
+  take: 
+	ont_reads       // nanopore reads in fastq format
+	illumina_reads  // illumina reads in fastq format, paired
+
+  main:
+	pubDir = "flye_assembly"
+
+	flye(ont_reads, pubDir)
+	polish_assembly(ont_reads, illumina_reads, flye.out.asm, pubDir)
+	assembly_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+	contamination_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+
+  emit:
+	asm = polish_assembly.out.asm
+}
+workflow nextdenovo_assembly {
+  /* 
+  A workflow for assembly with nextdenovo, including preliminary analysis
+  */
+  take: 
+	ont_reads       // nanopore reads in fastq format
+	illumina_reads  // illumina reads in fastq format, paired
+
+  main:
+    pubDir = "nextdenovo"
+
+	nextdenovo(ont_reads_axenic, pubDir)
+	polish_assembly(ont_reads, illumina_reads, nextdenovo.out.asm, pubDir)
+	assembly_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+	contamination_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+
+  emit:
+	asm = polish_assembly.out.asm
+}
+
+workflow smartdenovo_assembly {
+  /* 
+  A workflow for assembly with smartdenovo, including preliminary analysis
+  */
+  take: 
+	ont_reads       // nanopore reads in fastq format
+	illumina_reads  // illumina reads in fastq format, paired
+
+  main:
+    pubDir = "nextdenovo"
+
+	smartdenovo(ont_reads_axenic, pubDir)
+	polish_assembly(ont_reads, illumina_reads, smartdenovo.out.asm, pubDir)
+	assembly_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+	contamination_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+
+  emit:
+	asm = polish_assembly.out.asm
+}
+}
+
+workflow flye_hq_assembly {
+  /* 
+  A workflow for assembly with flye in high-quality read mode, including preliminary analysis
+  */
+  take: 
+	ont_reads       // nanopore reads in fastq format
+	illumina_reads  // illumina reads in fastq format, paired
+
+  main:
+	pubDir = "flye_hq_assembly"
+
+	flye_hq(ont_reads, pubDir)
+	polish_assembly(ont_reads, illumina_reads, flye_hq.out.asm, pubDir)
+	assembly_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+	contamination_analysis(ont_reads, polish_assembly.out.asm, pubDir)
+
+  emit:
+	asm = polish_assembly.out.asm
+}
+
+workflow polish_assembly {
+  /* 
+  A workflow to polish ont based assemblies
+  */ 
+  take:
+	ont_reads       // nanopore reads in fastq format
+	illumina_reads  // illumina reads in fastq format, paired
+	assembly        // an assembly in fasta format
+	pubDir          // publish directory
+
+  main:
+	racon_nano(assembly, ont_reads, pubDir)
+	medaka(racon_nano.out.asm, ont_reads, pubDir)
+	pilon_polishing(medaka.out.asm, illumina_reads, pubDir)
+
+  emit:
+	asm = pilon_polishing.out.asm
+}
+
+workflow pilon_polishing {
+  /* 
+  A workflow to for pilon polishing
+  */ 
+  take:
+	assembly        // an assembly in fasta format
+	illumina_reads  // illumina reads in fastq format, paired
+	pubDir          // publish directory
+
+  main:
+	pubDir = pubDir + "/pilon1"
+	pilon_setup(assembly, illumina_reads, pubDir)
+	pilon(pilon_setup.out.asm_part.flatten().combine(pilon_setup.out.bam_part), pubDir)
+	pilon_collect(pilon.out.asm_part.collect(), pubDir)
+
+  emit:
+	asm = pilon_collect.out.asm
+}
+
+process canu {
+  /* 
+  A process to perform genome assembly using canu
+  */ 
+
+  publishDir { params.results + pubDir + "/" + "canu" } , mode: "copy"
+  label "slurm_canu"
+  module "biology"
+  module "viz"
+  module "gnuplot"
+
+  input:
+	path(reads)   // nanopore reads in fastq format
+	val(pubDir)   // publish directory
+
+  output:
+	path("${params.prefix}.trimmedReads.fasta.gz"), emit: corrected_reads
+	path("${params.prefix}.contigs.fasta"), emit: asm
+	path("*")
+
+  // submits the job to the server (canu runs itself on slurm). wait for it to finish by waiting for canu.done file to be generated
+  script:
+	"""    
+	canu -p ${params.prefix} -d ./ genomeSize=${params.genome_size} -nanopore-raw ${reads} 'onSuccess=touch ./canu.done' 'onFailure=touch ./canu.done' gridOptions="--time=8:00:00 -p ellenyeh,normal,owners" 'corMhapOptions=--threshold 0.8 --ordered-sketch-size 1000 --ordered-kmer-size 14' correctedErrorRate=0.105
+	
+	count=0
+	while [ ! -f canu.done ]
+	do
+	  sleep 5
+	  count=\$((count+5))    
+	  STR="running canu for "\${count}" seconds"
+	  printf \$STR
+	done
+	"""
+}
+
+process flye {
+  /* 
+  A process to perform genome assembly using flye
+  */ 
+
+  publishDir { params.results + pubDir + "/" + "flye" } , mode: "copy"
+  label "slurm_flye"
+  
+
+  input:
+	path(reads)   // nanopore reads in fastq format
+	val(pubDir)   // publish directory
+
+  output:
+	path("assembly.fasta"), emit: asm
+	path("*")
+
+  script:
+	"""
+	flye --scaffold --nano-raw ${reads} --threads ${task.cpus} --out-dir ./
+	"""
+}
+
+process flye_hq {
+  /* 
+  A process to perform genome assembly using flye with high quality nanopore reads
+  */ 
+
+  publishDir { params.results + pubDir + "/" + "flye" } , mode: "copy"
+  label "slurm_flye"
+  
+
+  input:
+	path(reads)   // nanopore reads in fastq format
+	val(pubDir)   // publish directory
+
+  output:
+	path("assembly.fasta"), emit: asm
+	path("*")
+
+  script:
+	"""
+	flye --scaffold --nano-hq ${reads} --threads ${task.cpus} --out-dir ./
+	"""
+}
+
+process raven {
+  /* 
+  A process to perform genome assembly using raven
+  */ 
+
+  publishDir { params.results + pubDir + "/" + "raven" } , mode: "copy"
+  label "slurm_raven"
+  
+
+  input:
+	path(reads)   // nanopore reads in fastq format
+	val(pubDir)   // publish directory
+
+  output:
+	path("assembly.fasta"), emit: asm
+	path("*")
+
+  script:
+	"""
+	raven -t ${task.cpus} ${reads} > assembly.fasta
+	"""
+}
+
+process shasta {
+  /* 
+  A process to perform genome assembly using shasta
+  */ 
+
+  publishDir { params.results + pubDir + "/" + "shasta" } , mode: "copy"
+  label "slurm_shasta"
+  
+  input:
+	path(reads)   // nanopore reads in fastq format
+	val(pubDir)   // publish directory
+
+  output:
+	path("asm/Assembly.fasta"), emit: asm
+	path("asm/*")
+
+  script:
+	"""    
+	if [[ ${reads} == *.gz ]]; 
+	then
+	  gunzip -c ${reads} > input_reads.fastq
+	else 
+	  cp ${reads} input_reads.fastq
+	fi
+
+	shasta --input input_reads.fastq --assemblyDirectory "./asm" --command assemble --threads ${task.cpus} --config Nanopore-Oct2021 --MinHash.minHashIterationCount 50 --MinHash.m 3
+	"""
+}
+
+process shasta_hap {
+  /* 
+  A process to perform genome assembly using shasta in haplotype mode
+  */ 
+
+  publishDir { params.results + pubDir + "/" + "shasta" } , mode: "copy"
+  label "slurm_shasta"
+  
+  input:
+	path(reads)   // nanopore reads in fastq format
+	val(pubDir)   // publish directory
+
+  output:
+	path("asm/Assembly-Haploid.fasta"), emit: asm
+	path("asm/*")
+
+  script:
+	"""    
+	if [[ ${reads} == *.gz ]]; 
+	then
+	  gunzip -c ${reads} > input_reads.fastq
+	else 
+	  cp ${reads} input_reads.fastq
+	fi
+
+	shasta --input input_reads.fastq --assemblyDirectory "./asm" --command assemble --threads ${task.cpus} --config Nanopore-Phased-Jan2022
+	"""
+}
+
+process pomoxis {
+  /* 
+  A process to perform genome assembly using pomoxis
+  */ 
+
+  publishDir { params.results + pubDir + "/" + "pomoxis" } , mode: "copy"
+  label "slurm_pomoxis"
+  
+
+  input:
+	path(reads)   // nanopore reads in fastq format
+	val(pubDir)   // publish directory
+
+  output:
+	path("assm/pomoxis_final.fa"), emit: asm
+	path("*")
+
+  script:
+	"""
+	mini_assemble -i ${reads} -p pomoxis -t ${task.cpus}
+	"""
+}
+
+process nextdenovo {
+  /* 
+  A process to perform genome assembly using nextdenovo
+  */ 
+  publishDir { params.results + pubDir + "/" + "nextdenovo" } , mode: "copy"
+  label "slurm_nextdenovo"
+  
+  input:
+    path(ont_reads)
+    val(pubDir)
+
+  output:
+    path("work/03.ctg_graph/*.asm.fasta"), emit: asm
+    path("*")
+
+  script:
+	// Needs custom config file. Easier to write it here then have the user supply it
+    """
+
+    cat > run.cfg <<- EOM
+    [General]
+    job_type = slurm
+    job_prefix = nextDenovo
+    task = all
+    rewrite = yes
+    deltmp = yes
+    parallel_jobs = 300
+    input_type = raw
+    read_type = ont # clr, ont, hifi
+    input_fofn = input.fofn
+    workdir = work
+
+    [correct_option]
+    read_cutoff = 5k
+    genome_size = ${params.genome_size} # estimated genome size
+    sort_options = -m 224g -t 24
+    minimap2_options_raw = -t 16
+    pa_correction = 24
+    correction_options = -p 30
+
+    [assemble_option]
+    minimap2_options_cns = -t 16
+    nextgraph_options = -a 1
+    EOM
+    
+    ls ${ont_reads} > input.fofn
+
+    ${params.nextdenovo} run.cfg
+    """
+}
+
+process smartdenovo {
+  /* 
+  A process to perform genome assembly using smartdenovo
+  */ 
+  publishDir { params.results + pubDir + "/" + "smartdenovo" } , mode: "copy"
+  label "slurm_smartdenovo"
+  
+  input:
+    path(ont_reads)
+    val(pubDir)
+
+  output:
+    path("*.utg"), emit: asm
+    path("*")
+
+  script:
+    """
+    ${params.smartdenovo}/wtpre -J 5000 ${ont_reads} | gzip -c -1 > sd.fa.gz
+    ${params.smartdenovo}/wtzmo -t ${task.cpus} -i sd.fa.gz -fo sd.dmo.ovl -k 17 -z 10 -Z 16 -U -1 -m 0.1 -A 1000
+    ${params.smartdenovo}/wtclp -i sd.dmo.ovl -fo sd.dmo.obt -d 3 -k 300 -m 0.1 -FT
+    ${params.smartdenovo}/wtlay -i sd.fa.gz -b sd.dmo.obt -j sd.dmo.ovl -fo sd.dmo.lay -w 300 -s 200 -m 0.1 -r 0.95 -c 1
+
+    """
+}
+
+process unicycler {
+  /* 
+  A process to perform hybrid genome assembly using unicycler - useful for spheroid body and organelles
+  */ 
+
+  publishDir { params.results + pubDir + "/" + "unicycler" } , mode: "copy"
+  label "slurm_shasta"
+
+  input:
+	path(ont_reads)           // nanopore reads in fastq format
+	tuple path(r1), path(r2)  // illumina reads in fastq format, paired
+	val(pubDir)               // publish directory
+
+  output:
+	path("asm/assembly.gfa"), emit: asm_graph
+	
+  script:
+	"""
+	unicycler -1 ${r1} -2 ${r2} -l ${ont_reads} -o asm -t ${task.cpus}
+	"""
+}
+
+process racon_illumina {
+  /* 
+  A process to perform racon polishing using illumina reads
+  */ 
+  publishDir { params.results + pubDir + "/" + "racon_ill" } , mode: "copy"
+  label "slurm_racon"
+  
+
+  input:
+	path(assembly)            // assembly in fasta format
+	tuple path(r1), path(r2)  // illumina reads in fastq format, paired
+	val(pubDir)               // publish directory
+
+  output:
+	path(racon_polish), emit: asm
+	path("*") 
+ 
+  script:
+	racon_polish = "${params.prefix}.racon_polish_assembly.fasta"
+	iterations = 2
+	"""
+	asm=$assembly
+
+	for i in {0..${iterations}};
+	do
+	  bwa index \${asm}
+	  bwa mem -t ${task.cpus} \${asm} ${sr_R1}  > mapped_reads_\$i.sam
+	  racon -t ${task.cpus} ${sr_R1} mapped_reads_\$i.sam \$asm > racon_asm_\$i.fasta
+	  asm=racon_asm_\$i.fasta
+	  cat \$asm > ${racon_polish}
+	done
+	"""
+}
+
+process racon_nano {
+  /* 
+  A process to perform racon polishing using nanopore reads
+  */ 
+
+  publishDir { params.results + pubDir + "/" + "racon_nano" } , mode: "copy"
+  label "slurm_racon"
+  
+  input:
+	path(assembly)    // assembly in fasta format
+	path(reads)       // nanopore reads in fastq format
+	val(pubDir)       // publish directory
+
+  output:
+	path(racon_polish), emit: asm
+	path("*") 
+ 
+  script:
+	racon_polish = "${params.prefix}.racon_polish_nano_assembly.fasta"
+	iterations = 2
+	"""
+	asm=$assembly
+
+	for i in {0..${iterations}};
+	do
+	  minimap2 -ax map-ont \${asm} ${reads} > mapped_reads_\$i.sam -t ${task.cpus}
+	  racon -t ${task.cpus} ${reads} mapped_reads_\$i.sam \$asm > racon_asm_\$i.fasta
+	  asm=racon_asm_\$i.fasta
+	  cat \$asm > ${racon_polish}
+	done
+	"""
+}
+
+process medaka {
+  /* 
+  A process to perform medaka polishing using nanopore reads
+  */ 
+
+  publishDir { params.results + pubDir + "/" + "medaka" } , mode: "copy"
+  label "slurm_medaka"
+  module "cuda"
+  
+  input:
+	path(assembly)    // assembly in fasta format
+	path(reads)       // nanopore reads in fastq format
+	val(pubDir)       // publish directory
+
+  output:
+	path("medaka/consensus.fasta"), emit: asm
+	path("*")
+
+  script:
+  """
+  medaka_consensus -i ${reads} -d ${assembly} -t ${task.cpus} -m ${params.medaka_model} -f -o medaka
+  """
+}
+
+process nextPolish {
+  /* 
+  A process to perform nextPolish polishing using nanopore reads
+
+  depreicated
+  */ 
+
+  publishDir { params.results + pubDir + "/" + "nextPolish" } , mode: "copy"
+  label "slurm_racon"
+  
+  input:
+	path(assembly)            // assembly in fasta format
+	tuple path(r1), path(r2)  // illumina reads in fastq format, paired
+	val(pubDir)               // publish directory
+
+  output:
+	path("*.fasta"), emit: asm
+	path("*")
+
+  script:
+	"""
+	ls ${r1} ${r2} > sgs.fofn
+	genome=${assembly}
+	echo -e "task = best\ngenome = \$genome\nsgs_fofn = sgs.fofn" > run.cfg
+	nextPolish run.cfg
+	"""
+}
+
+process pilon_setup {
+  /* 
+  A process to stage a run of pilon by splitting the genome into multiple chunks
+  */ 
+  publishDir { params.results + pubDir + "/" + "pilon_setup" } , mode: "copy"
+  label "slurm_pilon_setup"
+  
+  input:
+	path(assembly)            // assembly in fasta format
+	tuple path(r1), path(r2)  // illumina reads in fastq format, paired
+	val(pubDir)               // publish directory
+
+  output:
+	path("$base.*.fasta"), emit: asm_part
+	path("sr_alignment.sorted.bam"), emit: bam_part
+	path("*")
+
+  script:
+	base = assembly.SimpleName
+	splits = 5
+	"""
+	bwa index ${assembly}
+	bwa mem -t ${task.cpus} ${assembly} ${r1} ${r2} | samtools view -b > sr_alignment.bam
+	samtools sort -m 1G -@ ${task.cpus} sr_alignment.bam > sr_alignment.sorted.bam
+	samtools index sr_alignment.sorted.bam
+	pyfasta split -n ${splits} ${assembly} 
+	"""
+}
+
+process pilon {
+  /* 
+  A process to perform pilon polishing on a genome
+  */ 
+
+  publishDir { params.results + pubDir + "/" + "pilon" } , mode: "copy"
+  label "slurm_pilon"
+  
+  input:
+	tuple path(assembly), path(bam)
+	val(pubDir)
+
+  output:
+	path("*.fasta"), emit: asm_part
+	path("*")
+
+  script:
+	// Need to limit memory given to pilon or it crashes. 
+	// Limite memory to 90% of available memory
+	jmem = Math.floor((0.9 * task.memory).toString()[0..-3].toDouble()).toInteger()
+
+	// base name for output
+	base = assembly.Name.substring(0,assembly.Name.lastIndexOf('.')) + ".polished"
+
+	"""
+	samtools index ${bam}
+	java -Xmx${jmem}G -jar /home/groups/ellenyeh/Rgibba_nanopore_assembly_dirty/Rgibba_nanopore/env/share/pilon-1.23-3/pilon-1.23.jar --genome ${assembly} --bam ${bam} --output ${base} --outdir ./ --changes
+	"""
+}
+
+process pilon_collect {
+  /* 
+  A process to collect the results from parallelized pilon
+  */ 
+  publishDir { params.results + pubDir + "/" + "pilon_collect" } , mode: "copy"
+  label "slurm_short"
+
+  input:
+	path(assembly)      // assembly in fasta format
+	val(pubDir)         // publish directory
+
+  output:
+	path(combined_asm), emit: asm
+	path("*")
+
+  script:
+	combined_asm = "pilon_combined.fasta"
+	"""
+	cat ${assembly} >> ${combined_asm}
+	"""
+}
+
+
+

@@ -1,0 +1,269 @@
+/*
+Nextflow Script
+Author: Jon Doenier
+Date: 2023
+Description: Perform annotation of genomes
+*/
+
+import java.time.LocalDateTime
+
+nextflow.enable.dsl=2
+
+workflow annotate_genome {
+  /* 
+  A workflow to annotate a genome (fasta file) given rna_seq_reads (fastq)
+  */
+  take:
+    genome          // a genome to annotate
+    rna_seq_reads   // RNA seq reads to use for annotation
+
+  main:
+
+    pubDir = "genome_annotation"
+
+    // Model and mask repeats
+    repeat_modeler(genome, pubDir)
+    repeat_masker(genome, repeat_modeler.out.lib, pubDir)
+
+    // Align reads to genome
+    STAR(repeat_masker.out.masked_genome, rna_seq_reads, pubDir + "/rna_seq_reads/")
+
+    // Perform ensemble annotation using RNA seq reads and conserved proteins
+    braker_transcript(repeat_masker.out.masked_genome, STAR.out.mapped_reads, pubDir)
+    braker_prot(repeat_masker.out.masked_genome, pubDir)
+    TSEBRA(repeat_masker.out.masked_genome, braker_transcript.out.annotation, braker_transcript.out.hints, braker_prot.out.annotation, braker_prot.out.hints, pubDir)
+
+    // Perform functional annotation
+    eggnog(TSEBRA.out.cds, pubDir)
+    interproscan(TSEBRA.out.cds, pubDir)
+}
+
+process repeat_modeler {
+  /* 
+  Use repeat modeler to model the repeat and low complexity sequences present in a genome fasta file
+  */
+
+  publishDir { params.results + pubDir + "/" + "repeat_masking" } , mode: "copy"
+
+  label "slurm_repeatM"
+
+  input:
+    path(genome)    // Genome in fasta format
+    val(pubDir)     // publish directory
+
+  output:
+    path("${prefix}*.classified"), emit: lib
+    path("*")
+
+  script:
+    prefix = genome.SimpleName
+    pa = task.cpus / 4     // rmblast uses 4 cores per job (i.e. -pa)
+    """
+    BuildDatabase -name ${prefix}.DB -engine rmblast ${genome}
+    RepeatModeler -database ${prefix}.DB -engine ncbi -pa ${pa} -LTRStruct
+    RepeatClassifier -consensi ${prefix}*.fa -stockholm ${prefix}*.stk
+    """
+}
+
+process repeat_masker {
+  /* 
+  Mask repetative regions in a genome file given a library of repeat and low complexity models
+  */
+
+  publishDir { params.results + pubDir + "/" + "repeat_masking" } , mode: "copy"
+
+  label "slurm_repeatM"
+
+  input:
+    path(genome)    // genome in fasta format
+    path(lib)       // library of repeats
+    val(pubDir)     // publish directory
+
+  output:
+    path("*.mask*"), emit: masked_genome
+    path("*")
+
+  script:
+    prefix = genome.SimpleName
+    pa = task.cpus / 4    // rmblast uses 4 cores per job (i.e. -pa)
+    """
+    RepeatMasker -pa ${pa} -engine rmblast -qq -gff -xsmall -lib ${lib} ${genome}
+    """
+}
+
+process STAR {
+  /* 
+  Map RNAseq reads to a genome 
+  */
+
+  publishDir { params.results + pubDir + "/" + "STAR_alignment" } , mode: "copy"
+
+  label "slurm_star"
+
+  input:
+    path(genome)              // genome in fasta format 
+    tuple path(r1), path(r2)  // paired RNAseq reads
+    val(pubDir)               // publish directory
+
+  output:
+    path("${params.prefix}.bam"), emit: mapped_reads
+    path("*")
+
+  script:
+    """
+    STAR --runThreadN ${task.cpus} --runMode genomeGenerate --genomeDir ./ --genomeFastaFiles ${genome}
+    STAR --twopassMode Basic --genomeDir ./ --runThreadN ${task.cpus} --readFilesIn ${r1} ${r2} --outFileNamePrefix ${params.prefix} 
+    samtools view -b ${params.prefix}*.sam > ${params.prefix}.bam
+    """
+}
+
+process braker_prot {
+  /* 
+  Predict protein coding regions of a genome using evolutionary protein data 
+  */
+
+  publishDir { params.results + pubDir + "/" + "braker_protein" } , mode: "copy"
+
+  label "slurm_braker"
+  module "perl"
+
+  input:
+    path(genome)    // genome in fasta format
+    val(pubDir)     // publish directory
+
+  output:
+    path("braker/braker_prot.gtf"), emit: annotation
+    path("braker/hintsfile_prot.gff"), emit: hints
+    path("cds.fa"), emit: cds
+    path("*")
+
+  script:
+    """
+    species=${params.prefix}_prothint
+        
+    braker.pl --genome=${genome} --species=\$species --softmasking --gff3 --prot_seq=${params.braker_prot_path} --GENEMARK_PATH=${projectDir}/env/gmes --cores ${task.cpus} --PROTHINT_PATH=/home/groups/ellenyeh/Rgibba_nanopore_assembly_dirty/Rgibba_nanopore/env/ProtHint-2.6.0/bin
+
+    gffread -x cds.fa -g ${genome} --gtf braker/braker.gtf
+
+    cd braker
+    cp braker.gtf braker_prot.gtf
+    cp hintsfile.gff hintsfile_prot.gff 
+    """
+}
+
+process braker_transcript {
+  /* 
+  Predict protein coding regions of a genome using RNAseq data 
+  */
+
+  publishDir { params.results + pubDir + "/" + "braker_transcript" } , mode: "copy"
+
+  label "slurm_braker"
+  module "perl"
+
+  input:
+    path(genome)    // fasta format
+    path(bam)       // aligned RNAseq reads in bam format
+    val(pubDir)     // publish directory
+
+  output:
+    path("braker/braker_trans.gtf"), emit: annotation
+    path("braker/hintsfile_trans.gff"), emit: hints
+    path("cds.fa"), emit: cds
+    path("*")
+
+  script:
+    """
+    species=${params.prefix}_transcript
+
+    braker.pl --genome=${genome} --species=\$species --gff3 --softmasking --bam=${bam} --GENEMARK_PATH=${projectDir}/env/gmes --cores ${task.cpus}
+    gffread -x cds.fa -g ${genome} --gtf braker/braker.gtf 
+
+    cd braker
+    cp braker.gtf braker_trans.gtf
+    cp hintsfile.gff hintsfile_trans.gff
+    """
+}
+
+process TSEBRA {
+  /* 
+  Pick the highest quality annotations of a genome given multiple sets of annotations
+  */
+
+  publishDir { params.results + pubDir + "/" + "TSEBRA" } , mode: "copy"
+
+  label "slurm_braker"
+  module "perl"
+
+  input:
+    path(genome)        // genome to annotate in fasta format
+    path(gtf_trans)     // transcipt based annotations
+    path(hints_trans)   // transcript based hints
+    path(gtf_prot)      // protein based annotations
+    path(hints_prot)    // protein based hints
+    val(pubDir)         // publish directory
+
+  output:
+    path("${params.prefix}_combined.gtf"), emit: annotation
+    path("cds.fa"), emit: cds
+    path("*")
+
+  script:
+    """
+    path=${params.tsebra_path}
+    config=\$path/config/default.cfg
+
+    \$path/bin/fix_gtf_ids.py --gtf ${gtf_trans} --out trans_fixed.gtf
+    \$path/bin/fix_gtf_ids.py --gtf ${gtf_prot} --out prot_fixed.gtf  
+    
+    \$path/bin/tsebra.py --gtf trans_fixed.gtf,prot_fixed.gtf -e ${hints_trans},${hints_prot} -c \$config --out ${params.prefix}_combined.gtf
+    
+    gffread -x cds.fa -g ${genome} --gtf ${params.prefix}_combined.gtf
+    """
+}
+
+process eggnog {
+  /* 
+  Functional genome annotation using eggnog
+  */
+
+  publishDir { params.results + pubDir + "/" + "eggnog" } , mode: "copy"
+
+  label "slurm_eggnog"
+
+  input:
+    path(cds)     // protein coding regions in fasta format
+    val(pubDir)   // publish directory
+
+  output:
+    path("*")
+
+  script:
+    """
+    emapper.py -i ${cds} --itype CDS --translate -o functional_annotations --cpu ${task.cpus}
+    """
+}
+
+process interproscan {
+  /* 
+  Functional genome annotation using interproscan  
+  */
+
+  publishDir { params.results + pubDir + "/" + "interproscan" } , mode: "copy"
+
+  label "slurm_interproscan"
+  module "java/11"
+
+  input:
+    path(cds)     // protein coding regions in fasta format
+    val(pubDir)   // publish directory
+
+  output:
+    path("*")
+
+  script:
+    """
+    faTrans -stop ${cds} cds.faa
+    /home/groups/ellenyeh/jdoenier/bin/interproscan-5.52-87.0/interproscan.sh --input cds.faa --goterms -b ipscan --iprlookup --cpu ${task.cpus}
+    """
+}

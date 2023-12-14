@@ -1,0 +1,94 @@
+#!/usr/bin/env nextflow
+
+/*
+Nextflow Script
+Author: Jon Doenier
+Date: 2023-12-07
+Description: Script to run a variety of genome assembly and analysis workflows
+
+Usage:
+nextflow run_all.nx -c <config.txt> [ -with-report <report.html> -w <work_directory>
+*/
+
+import java.time.LocalDateTime
+
+nextflow.enable.dsl=2
+
+include { preprocess_nanopore; preprocess_illumina; preprocess_rna_seq } from "./src/read_processing.nx"
+
+include { organelle_assembly } from "./src/organelle_assembly.nx"
+
+include { pomoxis_assembly; raven_assembly; shasta_assembly; shasta_hap_assembly; canu_assembly; flye_assembly; flye_hq_assembly } from "./src/genome_assembly.nx"
+
+include { annotate_genome } from "./src/annotate_genome.nx"
+
+
+workflow {
+
+  // Obtain sequencing reads
+  ont_reads = preprocess_nanopore().ont_reads
+  illumina_reads = preprocess_illumina().illumina_reads
+  rna_seq_reads = preprocess_rna_seq().rna_seq_reads
+
+  // Perform organelle assembly
+  organelle_assembly(ont_reads, illumina_reads)
+
+  // Perform genome assemblies using different assembliers
+  shasta_assembly(ont_reads, illumina_reads)
+  shasta_hap_assembly(ont_reads, illumina_reads)
+  raven_assembly(ont_reads, illumina_reads)
+  pomoxis_assembly(ont_reads, illumina_reads)
+  canu_assembly(ont_reads, illumina_reads)
+  flye_assembly(ont_reads, illumina_reads)
+  flye_hq_assembly(ont_reads, illumina_reads)
+
+  // Perform genome annotation
+  annotate_genome(flye_assembly.out.asm, rna_seq_reads)
+
+  // Save code for documentation
+  document()
+
+}
+
+process document {
+  /* 
+  A process to save a copy of the scripts used to perform the run
+  */
+  publishDir { params.results + "/" + "documentation" } , mode: "copy"
+  label "slurm_trivial"
+
+  output:
+    path("*")
+
+  script:
+    // Copy all Nextflow scripts to the documentation directory
+    """
+    cp ${projectDir}/*.nx ./
+    """
+}
+
+
+def print_params() {
+  /* 
+  Print parameters to the console, so user is reminded of their run setup
+  */
+  def param_log = """Parameters:
+  \tresults:        $params.results
+  \tscripts:        $params.scripts
+  \tresources:      $params.resources
+  \tdiamond_db:     $params.diamond_db
+  \tnr_nodes_db:    $params.nr_nodes_db
+  \tnr_names_db:    $params.nr_names_db
+
+  \tprefix:         $params.prefix
+  \tont_reads:      $params.ont_reads   <- will be ignored if fast5_dir is set 
+  \tillumina:       $params.illumina  
+  \tfast5_dir:      $params.fast5_dir
+  \tguppy_config:   $params.guppy_config
+  \tguppy_model:    $params.guppy_model
+  """
+  println(param_log)
+}
+
+print_params() // Print params for user
+

@@ -1,0 +1,289 @@
+/*
+Nextflow Script
+Author: Jon Doenier
+Date: 2023
+Description: Perform analysis of assembled genomes
+*/
+
+nextflow.enable.dsl=2
+
+workflow assembly_analysis {
+  /* 
+  A workfow to assess the quality of a genome annotation
+  */
+  take: 
+    ont_reads     // nanopore reads in fastq format
+    assembly      // Fasta assembly file
+    pubDir        // publish directory name
+
+  main:
+
+    pubDir += "/Quality_analysis"
+    
+    quast(assembly, pubDir)
+    busco(assembly, pubDir)
+    coverage(assembly, ont_reads, pubDir)
+}
+
+workflow contamination_analysis {
+  /* 
+  A workflow to assess contamination present in a genome assembly
+  */
+  take:
+    ont_reads     // nanopore reads in fastq format
+    assembly      // assembly to analyze
+    pubDir        // publish directory name
+
+  main:
+  
+    pubDir += "/Contamination_analysis"
+  	diamond(assembly, pubDir)
+    blob_tax = blobtools(assembly, ont_reads, diamond.out.hits_file, pubDir).blob_tax
+}
+
+workflow diamond {
+  /* 
+  A workflow to run diamond in parallel
+  */
+  take:
+  	fastx	    // fasta or fastq file
+  	pubDir    // publish directory
+
+  main: 
+
+    pubDir += "/Diamond"
+
+    // convert reads to fasta (diamond claims unnecessary (?))
+    fasta = convert_to_Fasta(fastx, pubDir).fasta
+
+    // Blast fasta in small chunks
+    diamond_blast(fasta.splitFasta( size: 1.MB, file: true ), pubDir)
+
+    // Combind blast results
+    diamond_collect(diamond_blast.out.hits_file.collect(), pubDir)
+
+    // look at taxa of results
+    ktBlast(diamond_collect.out.hits_file, pubDir)
+
+    // determine % of each contig that blasts to bacteria
+    bact_contigs(diamond_collect.out.hits_file, pubDir) 
+
+  emit:
+  	hits_file = diamond_collect.out.hits_file
+}
+
+process quast {
+  /* 
+  A process to run quast on a genome assembly (fasta)
+  */
+  publishDir { params.results + pubDir + "/" + "quast" } , mode: "copy"
+  errorStrategy = "ignore"
+  label "slurm_trivial"
+  
+
+  input:
+    path(assembly)    // fasta file
+    val(pubDir)       // publish directory
+
+  output:
+    path("*")
+
+  script:
+    """
+    quast.py -o ./ ${assembly}
+    """
+}
+
+process blobtools { 
+  /* 
+  A process to run blobtools on a genome assembly (fasta)
+  */
+  publishDir { params.results + pubDir + "/" + "blobtools" } , mode: "copy"
+  errorStrategy = "ignore"
+  label "slurm_blobtools"
+  
+
+  input:
+    path(contigs)   // fasta file
+    path(reads)     // nanopore reads in fastq formate
+    path(hitspath)  // blast results
+    val(pubDir)     // publish directory
+
+  output: // only output some info because the mapping files are large and unecessary
+    path("*.txt")
+    path("*.json")
+    path("*.png")
+    path("*.cov")
+    path("*.tsv")
+    path("*.cov")
+    path(blob_tax), emit: blob_tax
+
+  script:
+    blob_tax = "taxonomy.tsv"
+    pubDir_safe = pubDir.replaceAll("/", "_")
+    """
+    # Map, sort, and index reads
+    minimap2 -ax map-ont -t ${task.cpus} ${contigs} ${reads} > mapped.sam
+    samtools view -b mapped.sam > mapped.bam
+    samtools sort -m 2G -@ ${task.cpus} -o mapped.sorted.bam mapped.bam
+    samtools index mapped.sorted.bam
+
+    # Reformat hits file for blobtools
+    awk '{ print \$1 "\t" \$13 "\t" \$12'} ${hitspath} > temp_hits_file.dmd_out
+
+    # Run blobtools
+    blobtools create -i ${contigs} -b mapped.sorted.bam -t temp_hits_file.dmd_out --nodes ${params.nr_nodes_db} --names ${params.nr_names_db} -o ${pubDir_safe} --calculate_cov
+    blobtools plot -i ${pubDir_safe}*.json -o ${pubDir_safe}
+    python3 ${params.scripts}blob_to_tax.py --blob *.json
+    mv blob_taxonomy.tsv ${blob_tax}
+    """
+}
+
+
+process diamond_blast {
+  /* 
+  A process to run diamond (paramaterized to handle lower quality assemblies and nanopore reads)
+  */
+
+  label "slurm_diamond"
+  cache "lenient"
+
+  input:
+    path(reads)   // nanopore reads in fastq format
+    val(pubDir)   // publish directory
+
+  output:
+    path("*")
+    path(hits_path), emit: hits_file
+
+  script:
+    hits_path = reads.Name + ".dmd_out"
+    """
+    # -F required for frameshit (necessary for low-quality nanopore reads)
+    diamond blastx -b 12 -c 1 --threads ${task.cpus} --query $reads --db $params.diamond_db --out $hits_path -F 15 --range-culling --max-target-seqs 1 --evalue 0.00000000001 --salltitles --unal 1 --outfmt 6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore staxids qlen
+    """
+}
+
+process diamond_collect {
+  /* 
+  A process to collect split up results from diamond
+  */
+
+  publishDir { params.results + pubDir + "/" + "diamond" } , mode: "copy"
+  label "slurm_short"
+  cache "lenient"
+
+
+  input:
+    path(hits)      // blast results path
+    val(pubDir)     // publish directoyr
+
+  output:
+    path("*")
+    path(hit_path), emit: hits_file
+
+
+  script:
+    
+    try { 
+      hit_path = hits.get(0).SimpleName + ".dmd_out" 
+    } catch(Exception e) {
+      hit_path = hits.SimpleName + ".dmd_out" // assumes all inputs have same base name...
+    }
+    """
+    cat ${hits} >> ${hit_path}
+    """
+}
+
+process busco {
+  /* 
+  A process to run busco (eukaryotic and stramenopiles) on a genome assembly (fasta)
+  */
+
+  publishDir { params.results + pubDir + "/" + "BUSCO" } , mode: "copy"
+  label "slurm_busco"
+
+  input:
+    path(contigs)     // assembly in fasta format
+    val(pubDir)       // publish directory
+
+  output:
+    path("*")
+
+  script:
+    """
+    busco -i ${contigs} -f -m genome --lineage_dataset stramenopiles_odb10 -c ${task.cpus} -o stramenopiles
+    busco -i ${contigs} -f -m genome --lineage_dataset eukaryota_odb10 -c ${task.cpus} -o eukaryotes 
+    """
+}
+
+
+process ktBlast {
+  /* 
+  A process to read a blast file into krona and generate html plots
+  */
+
+  publishDir { params.results + pubDir + "/" + "krona_blast" } , mode: "copy"
+  label "slurm_trivial"
+
+  input:
+    path(hits_path)   // path to blast results
+    val(pubDir)       // publish directory
+
+  output:
+    path("*")
+
+  script:
+    all = "blast_all.krona.html"
+    sub_hits = "only_hits.dmd_out"
+    hits = "blast_only_hits.krona.html"
+    """
+    ktImportBLAST -f -o ${all} ${hits_path} > Missing_accession_errors_all.txt
+    grep -v "*" ${hits_path} > ${sub_hits}
+    ktImportBLAST -f -o ${hits} ${sub_hits} > Missing_accession_errors_only_hits.txt
+    """
+}
+
+process bact_contigs {
+  /* 
+  A process to run a python scripts that identifies what percents of blast hits in a contig
+  are from bacteria
+  */
+
+  publishDir { params.results + pubDir + "/" + "krona_blast" } , mode: "copy"
+  label "slurm_trivial"
+
+  input:
+    path(hits_path)   // blast hits file
+    val(pubDir)       // publish directory
+
+  output:
+    path("*")
+
+  script:
+    """
+    python3 ${params.scripts}bact_contigs.py ${hits_path}
+    """
+}
+
+process convert_to_Fasta {
+  /* 
+  A process to convert fastx into fasta
+  */
+  label "slurm_trivial"
+  publishDir { params.results + pubDir + "/" + "convert_to_fasta" } , mode: "copy"
+
+  input:
+    path(fastx)     // fasta for fastq file
+    val(pubDir)     // publish directory
+
+  output:
+    path(out_fasta), emit: fasta
+
+  script:
+    out_fasta = fastx.SimpleName + ".fasta"
+    """
+    seqtk seq -A ${fastx} > ${out_fasta}
+    head ${out_fasta}
+    """
+}
